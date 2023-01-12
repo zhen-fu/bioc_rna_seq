@@ -1,0 +1,293 @@
+---
+title: "Using Bioconductor R packages to conduct RNA-seq analysis"
+author: "Daisy Fu"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    self_contained: yes
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=F, message=F, cache=F)
+```
+
+# Introduction
+
+RNA-seq has become a widely used technology for profiling transcriptional activity in biological systems. One of the most common goals for RNA-seq analysis is to identify differentially expressed genes (DEG) and pathways that are related to a certain condition, and this can be associated with differences in biology.
+
+Here, we will cover the basic steps in RNA-seq, QC, filtering, normalization, DEG analysis, and enrichment analysis using Bioconductor packages including DESeq2, edgeR, clusterProfiler, and a few plotting tools. We will go through the workflow using a published dataset. 
+
+
+## The data
+
+For this tutorial we will use the dataset from Philip et al. 2017 ("Chromatin states define tumour-specific T cell dysfunction and reprogramming" published in May on Nature). The raw reads can be retrieved from GEO with accession # GSE89307. The goal of the analysis was to characterize genes expression in different T cell status/group (naive T cell, effector T cells, exhausted T cells at three time points, day 5, 21, and 35). Three biological replicates were collected for each group. 
+
+Sequencing was performed in a Illumina HiSeq 2500, ~50 million 50 bp paired-end reads were generated for each sample.
+
+STAR "quantMode" was used to get gene counts, "quanMode" coincides with those produced by HTSeq-count with default parameters, it assign reads to Ensembl gene ID based on the annotation file we supplied. For simplicity, I imported counts for all samples into one file. 
+
+
+# Load packages
+
+
+```{r load_libs, echo=TRUE, warning=F, message=F, cache=FALSE}
+  
+library(org.Mm.eg.db)
+library(tidyverse)
+library(edgeR)
+library(DESeq2)
+library(ggrepel)
+library(EnhancedVolcano)
+library(ggvenn)
+library(clusterProfiler)
+library(msigdbr)
+
+```
+
+# Read counts and meta info
+    
+    
+```{r read_counts_meta}
+
+# read count and meta file 
+counts <- read.delim("counts.txt", header = T, row.names = 1, sep = "\t")
+meta <- read.delim("meta.txt", header = T, row.names = 1, sep = "\t")
+
+## take a look at the first a few rows and columns of both files. 
+head(counts[, c(1:6)])
+meta ## there are only 15 samples, so we can check all their info. 
+
+## lastly, check to see of the colnames of count all in the same order in meta to meta rownames
+identical(rownames(meta), colnames(counts))
+
+```
+# PCA, dimensionl reduction
+
+We will first check how samples group in unsupervised clustering. 
+
+plotPCA in DESeq2 is a great function to use. You can change how many most variable genes to use to build the PCA. First we do a variance stabilizing, so the data are approximately homoskedastic (having constant variance along the range of mean values in expression values). 
+
+The default ntop is 500, but we can increase this to 2000 here. 
+
+Design is a design matrix or formula (that is the same as regression model, here we are using the column in meta that we are interested, which is condition)
+
+
+```{r pca, fig.height= 5, fig.width=7, fig.align = 'center' }
+## create a DESeqDataSet first:
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = meta,
+                              design = ~celltype)
+
+## variance stabilizing, so the data are approximately homoskedastic
+vsdata <- vst(dds, blind=FALSE)
+
+## then run PCA, specific how many most variable genes we want, default is 500
+## plotPCA with returnData =T returns a data frame with top two PCs
+ntop = 2000
+pca <- plotPCA(vsdata, intgroup=c("celltype"), returnData = T, ntop = ntop)
+percentVar <- round(100 * attr(pca, "percentVar")) 
+
+## plot PCA 
+ggplot(pca, aes(x = PC1, y = PC2, color = celltype)) + 
+  geom_point(size =1.5, alpha = 0.8, stroke = 0.8) +
+  theme_classic() +
+  geom_text_repel(label = pca$name, size = 4, max.overlaps = Inf, show.legend = F) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) + 
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle(paste0("PCA of top ", ntop, " most variable genes")) 
+
+
+## we see that the same cell types exhausted T cells have split into two different groups. that means just the cell type might not be sufficient 
+
+## do another PCA 
+pca2 <- plotPCA(vsdata, intgroup=c("celltype", "condition"), returnData = T, ntop = ntop)
+percentVar2 <- round(100 * attr(pca2, "percentVar")) 
+
+ggplot(pca2, aes(x = PC1, y = PC2, color = condition, shape = celltype )) + 
+  geom_point(size =1.5, alpha = 0.8, stroke = 0.8) +
+   theme_classic()  +
+ # geom_text_repel(label = pca$name, size = 4, max.overlaps = Inf, show.legend = F) +
+  xlab(paste0("PC1: ", percentVar2[1], "% variance")) + 
+  ylab(paste0("PC2: ", percentVar2[2], "% variance")) +
+  ggtitle(paste0("PCA of top ", ntop, " most variable genes")) 
+
+```
+
+
+# Detect DE genes 
+First, we will get more annotation for the Ensembl genes. Then we will create DGElist for edgeR, filtering low expression genes, output normalized counts, and test for DE genes (between naive and LM_effector_D5 cells only). 
+```{r de_gene, fig.height= 6.5, fig.width=7, fig.align = 'center'}
+
+## before we create DGElist, we might want more detailed annotation for our genes. 
+gene_names_df <- data.frame(row.names = rownames(counts))
+gene_names_df$Symbol <- mapIds(org.Mm.eg.db, rownames(gene_names_df),keytype="ENSEMBL", column="SYMBOL")
+
+gene_names_df$entrez <- mapIds(org.Mm.eg.db, rownames(gene_names_df),keytype="ENSEMBL", column="ENTREZID")
+
+## create DGE list now:
+## gene annotation can be stored in the DGElist as well.
+y <- DGEList(counts, samples = meta, genes = gene_names_df,
+             group = meta$condition) 
+
+## The below code filters the low expression genes. A gene has to have its CPM (counts per million) greater than 0.5 in at least two samples. 
+keep <- rowSums(edgeR::cpm(y$counts) > 0.5) >= 2 
+table(keep) ## check how many genes will be kept and how many will be removed. 
+
+y <- y[keep, , keep.lib.sizes=FALSE]
+## before we do normalization, let's check the sample meta info
+y$samples   ## please note the normalization factor. 
+y <- calcNormFactors(y)
+
+## check again and see how normalization factors have changed.
+y$samples  
+
+## let's output normalized counts, they are useful for making barplots or heatmap for specific genes. 
+norm_counts <- edgeR::cpm(y, log=TRUE)
+
+## note, we used log = TRUE, that means the CPM will be log2 transformed. The advantage is if CPM is lesser than 1, then log2 
+## will below zero, that means it is really lowly expressed. 
+## export count data, combined with detailed gene annotation.
+norm_counts_df <- y$genes %>% 
+  rownames_to_column("ensembl_id") %>% 
+  left_join(., as_tibble(norm_counts, rownames="ensembl_id")) 
+
+## create a directory called data to store relevant data, and save it as a tsv file 
+dir.create("data")  
+write_tsv(norm_counts_df, paste0("data", "/","norm_counts.tsv"))
+
+
+## design matrix, it is similar to regression modeling, for more information, see this post:https://bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/designmatrices.html
+design <- model.matrix(~0+condition, data = y$samples) 
+
+design
+
+
+## estimate dispersion. 
+## edgeR uses the negative binomial (NB) distribution to model the read counts for each gene in each sample. The dispersion parameter of the NB distribution accounts for variability between biological replicates
+
+## The NB dispersions tend to be higher for genes with very low counts. The biological coefficient of variation (BCV) tends to be in range from 0.05 to 0.2 for genetically identical mice or cell lines, whereas somewhat larger values (> 0.3) are observed for human subjects.
+
+## The NB model can be extended with quasi-likelihood (QL) methods to account for gene-specific variability from both biological and technical sources.
+## Under the QL framework, the NB dispersion trend is used to describe the overall biological variability across all genes, and gene-specific variability above and below the overall level is picked up by the QL dispersion. 
+
+y <- estimateDisp(y, design, robust=TRUE)
+
+fit <- glmQLFit(y, design, robust=TRUE)
+#plotQLDisp(fit, main=paste0("QLDisp plot"))
+
+
+## Testing for Differential Expression (DE)
+## here, we are testing DE between naive and LM_effector_D5
+LM.naive_contrast <- makeContrasts(conditionLM_effector_D5-conditionnaive, levels=design)
+
+res_LM_naive <- glmQLFTest(fit, contrast=LM.naive_contrast)
+
+## top 10 DE genes can be viewed using function topTags
+topTags(res_LM_naive)
+
+## use decideTests and summary can show a summary of how many DEGs were up and down. 
+summary(decideTests(res_LM_naive))
+
+## to output all the gene to a data frame, here n=Inf will save all the genes, but FDR can be used to filter. 
+res_LM_naive_all <- topTags(res_LM_naive, n=Inf)
+
+## last part in this section is to do a volcano plot, the easier way is to use package EnhancedVolano package. 
+## otherwise, ggplot2 can be used as well with more code. 
+
+EnhancedVolcano(res_LM_naive_all$table,
+    lab = res_LM_naive_all$table$Symbol,
+    x = 'logFC',
+    y = 'FDR',
+    title = "Volcano plot of LM-naive",
+    subtitle= "",
+    labSize = 4)
+    
+## create a new directory to save result table. 
+dir.create("results")
+write.table(res_LM_naive_all$table, "results/LM_naive_DE.txt", quote = F, sep = "\t",
+             row.names = T)
+
+```
+
+# Enrichment analysis
+
+There could be many DE genes, and it is a daunting task to go through each of them. We are interested in what pathways these DE genes represent. 
+
+We will be using Bioconductor package clusterProfiler (Yu et al. 2012) which supports both hypergeometric test ("enricher" function) and gene set enrichment analyses ("GSEA" function) of many ontology/pathways.
+
+
+## Hypergeometric test
+Hypergeometric test is a widely used approach to determine whether known biological functions or processes are over-represented (= enriched) in an experimentally-derived gene list, e.g. a list of DEGs.
+
+What we need here is a vector of gene IDs (just gene names), here, we will be using the results from edgeR that are up-regulated as least 2 fold.
+
+The most commonly used database for gene sets are Molecular Signatures Database (MSigDB: https://www.gsea-msigdb.org/gsea/msigdb/). MSigDB includes H, C1-C7 gene sets, among them, C5 is a collection of gene ontology set. Bioconductor package "msigdbr" allows easy downloading of MSigDB data for common species. Since C6 is the smallest gene set, we will use C6 here. 
+
+```{r hypergeo_test}
+
+msigdbr_show_species()
+
+## we are retrieving C6 from mouse using following code:
+C6_ensembl <- msigdbr(species = "Mus musculus", category = "C6") %>% dplyr::select(gs_name, ensembl_gene)
+head(C6_ensembl)
+
+## let's get all the up-regulated genes list, with fold change greater than 2 (log2 > 2)
+up_genes <- res_LM_naive_all$table %>% filter(logFC > 1 & FDR < 0.05) 
+
+up_enrich <- enricher(rownames(up_genes), TERM2GENE = C6_ensembl)
+
+up_enrich_df <- as.data.frame(up_enrich)
+
+```
+
+
+## GSEA
+
+The hypergeometric test is based on these differentially expressed genes. This approach will find genes where the difference is large and will fail where the difference is small, but evidenced in coordinated way in a set of related genes. GSEA (Subramanian et al. 2005) directly addresses this limitation. All genes can be used in GSEA; We usually sort genes based on their fold changes or pvalues, and compare this list to a predefined gene set, such as genes in certain pathways. It will help to detect situations where all genes in a predefined set change in a small but coordinated manner. P-values are generated from permutation tests. 
+
+Here, what we need is a list of all genes sorted by their fold change from largest to smallest (names of the vector is Ensembl ID).
+
+```{r gsea}
+
+## we will use all the genes. Get the fold change first
+gene_list <- res_LM_naive_all$table$logFC
+  
+## get the name of the genes too. 
+names(gene_list) <- rownames(res_LM_naive_all$table) ## the names of the gene list is the en ID. 
+
+## sort from largest to smallest.
+gene_list <- sort(gene_list, decreasing = TRUE)
+  
+gsea <- GSEA(gene_list, TERM2GENE = C6_ensembl) 
+
+gsea_df <- as.data.frame(gsea)
+
+```
+
+## Comparsion between two enrichment methods
+
+```{r compare}
+
+ggvenn(list("hypergeometric" = up_enrich_df$ID, 
+            "gsea" = gsea_df$ID), show_percentage = F)
+
+## save results from hypergeometric and gsea
+write.table(up_enrich_df , file = "results/hypergeometric_LM-naive_C6.txt" )
+write.table(gsea_df, file = "results/gsea_LM-naive_C6.txt")
+
+```
+
+
+
+
+
+
+
+

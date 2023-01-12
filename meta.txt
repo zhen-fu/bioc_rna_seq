@@ -1,0 +1,16 @@
+	celltype	Notes	condition	Filename
+RNA_N1	naive	RNA_N1 Naive CD8 T cells	naive	GSM2365761
+RNA_N2	naive	RNA_N2 Naive CD8 T cells	naive	GSM2365762
+RNA_N3	naive	RNA_N3 Naive CD8 T cells	naive	GSM2365763
+RNA_E5_1	Teff	RNA_E5_1 Teff cells d5	LM_effector_D5	GSM2365764
+RNA_E5_2	Teff	RNA_E5_2 Teff cells d5	LM_effector_D5	GSM2365765
+RNA_E5_3	Teff	RNA_E5_3 Teff cells d5	LM_effector_D5	GSM2365766
+RNA_L5_1	Tex	RNA_L5_1 Tex cells HCC d5	Cancer_exhausted_D5	GSM2365773
+RNA_L5_2	Tex	RNA_L5_2 Tex cells HCC d5	Cancer_exhausted_D5	GSM2365774
+RNA_L5_3	Tex	RNA_L5_3 Tex cells HCC d5	Cancer_exhausted_D5	GSM2365775
+RNA_L21_1	Tex	RNA_L21_1 Tex cells HCC d21	Cancer_exhausted_D21	GSM2365782
+RNA_L21_2	Tex	RNA_L21_2 Tex cells HCC d21	Cancer_exhausted_D21	GSM2365783
+RNA_L21_3	Tex	RNA_L21_3 Tex cells HCC d21	Cancer_exhausted_D21	GSM2365784
+RNA_L35_1	Tex	RNA_L35_1 Tex cells HCC d35	Cancer_exhausted_D35	GSM2365788
+RNA_L35_2	Tex	RNA_L35_2 Tex cells HCC d35	Cancer_exhausted_D35	GSM2365789
+RNA_L35_3	Tex	RNA_L35_3 Tex cells HCC d35	Cancer_exhausted_D35	GSM2365790
